@@ -1,0 +1,91 @@
+services:
+  # RabbitMQ Message Broker with Management Dashboard
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: media-pipeline-rabbitmq
+    ports:
+      - "5672:5672"     # AMQP protocol port
+      - "15672:15672"   # RabbitMQ Web Management UI
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for Pub/Sub Event Broadcasting & Task State Caching
+  redis:
+    image: redis:7.2-alpine
+    container_name: media-pipeline-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # FastAPI Web Service & WebSocket/SSE Server
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: media-pipeline-api
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_NAME=CourseVideoPipeline
+      - APP_ENV=production
+      - BROKER_TYPE=rabbitmq
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - REDIS_URL=redis://redis:6379/0
+      - STORAGE_TYPE=local
+      - TTS_PROVIDER=edge_tts
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    volumes:
+      - ./storage:/app/storage
+      - ./app:/app/app
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+  # Distributed Worker Process (Executes LLM, TTS, Pillow, FFmpeg)
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: media-pipeline-worker
+    environment:
+      - APP_NAME=CourseVideoWorker
+      - BROKER_TYPE=rabbitmq
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - REDIS_URL=redis://redis:6379/0
+      - STORAGE_TYPE=local
+      - TTS_PROVIDER=edge_tts
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    volumes:
+      - ./storage:/app/storage
+      - ./app:/app/app
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["python", "-m", "app.workers.consumer"]
+
+volumes:
+  rabbitmq_data:
+  redis_data:
